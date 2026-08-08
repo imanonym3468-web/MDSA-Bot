@@ -12,20 +12,20 @@ class BossPing(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # DEBUG: zeigt IMMER an, dass on_message ausgelöst wurde, auch ohne Mentions
-        print(f"[DEBUG] on_message ausgelöst | Autor={message.author} (bot={message.author.bot}) | Content='{message.content}' | Mentions={[u.id for u in message.mentions]}")
+        # DEBUG: flush=True erzwingt sofortiges Schreiben in die Container-Logs
+        print(f"[DEBUG] on_message ausgelöst | Autor={message.author} (bot={message.author.bot}) | Content='{message.content}' | Mentions={[u.id for u in message.mentions]}", flush=True)
 
         if message.author.bot:
             return
 
         if any(user.id == BOSS_ID for user in message.mentions):
-            print("[DEBUG] Match gefunden! Sende Antwort...")
+            print("[DEBUG] Match gefunden! Sende Antwort...", flush=True)
             try:
                 await message.reply("# ❌DONT PING MY BOSS🔨")
             except discord.Forbidden:
-                print("[DEBUG] FEHLER: Keine Berechtigung zum Antworten in diesem Kanal!")
+                print("[DEBUG] FEHLER: Keine Berechtigung zum Antworten in diesem Kanal!", flush=True)
             except discord.HTTPException as e:
-                print(f"[DEBUG] FEHLER beim Senden: {e}")
+                print(f"[DEBUG] FEHLER beim Senden: {e}", flush=True)
 
 
 async def setup(bot):
