@@ -18,12 +18,10 @@ async def on_ready():
     print(f"Eingeloggt als {bot.user}")
 
     # Lädt die giveaways.py als Cog (nur wenn noch nicht geladen)
-    if "giveaway" not in bot.extensions:
-        await bot.load_extension("giveaway")
+    if "giveaways" not in bot.extensions:
+        await bot.load_extension("giveaways")
     if "stats" not in bot.extensions:
         await bot.load_extension("stats")
-    if "boss_ping" not in bot.extensions:
-        await bot.load_extension("boss_ping")
 
     # Synct die Slash Commands mit Discord, damit sie im "/" Menü erscheinen
     synced = await bot.tree.sync()
