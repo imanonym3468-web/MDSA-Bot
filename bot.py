@@ -18,8 +18,8 @@ async def on_ready():
     print(f"Eingeloggt als {bot.user}")
 
     # Lädt die giveaways.py als Cog (nur wenn noch nicht geladen)
-    if "giveaways" not in bot.extensions:
-        await bot.load_extension("giveaways")
+    if "giveaway" not in bot.extensions:
+        await bot.load_extension("giveaway")
     if "stats" not in bot.extensions:
         await bot.load_extension("stats")
 
