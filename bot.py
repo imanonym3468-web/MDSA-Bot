@@ -22,6 +22,8 @@ async def on_ready():
         await bot.load_extension("giveaway")
     if "stats" not in bot.extensions:
         await bot.load_extension("stats")
+    if "boss_ping" not in bot.extensions:
+        await bot.load_extension("boss_ping")
 
     # Synct die Slash Commands mit Discord, damit sie im "/" Menü erscheinen
     synced = await bot.tree.sync()
