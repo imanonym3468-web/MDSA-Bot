@@ -15,8 +15,18 @@ class BossPing(commands.Cog):
         if message.author.bot:
             return
 
+        # DEBUG: zeigt in den Railway-Logs, welche Mentions in jeder Nachricht ankommen
+        if message.mentions:
+            print(f"[DEBUG] Nachricht von {message.author}: mentions={[u.id for u in message.mentions]} | Ziel-ID={BOSS_ID}")
+
         if any(user.id == BOSS_ID for user in message.mentions):
-            await message.reply("# ❌DONT PING MY BOSS🔨")
+            print("[DEBUG] Match gefunden! Sende Antwort...")
+            try:
+                await message.reply("# ❌DONT PING MY BOSS🔨")
+            except discord.Forbidden:
+                print("[DEBUG] FEHLER: Keine Berechtigung zum Antworten in diesem Kanal!")
+            except discord.HTTPException as e:
+                print(f"[DEBUG] FEHLER beim Senden: {e}")
 
 
 async def setup(bot):
