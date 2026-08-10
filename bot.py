@@ -29,15 +29,16 @@ async def on_ready():
     if "role" not in bot.extensions:
         await bot.load_extension("role")
 
-    # Alte GLOBALE Commands löschen (verhindert Duplikate mit den guild-spezifischen unten)
-    bot.tree.clear_commands(guild=None)
-    await bot.tree.sync()
-
     # Guild-spezifisches Sync: Commands erscheinen SOFORT auf deinem Server,
     # statt bis zu 1 Stunde auf das globale Sync zu warten
     bot.tree.copy_global_to(guild=GUILD_ID)
     synced = await bot.tree.sync(guild=GUILD_ID)
     print(f"{len(synced)} Slash Commands synced (Guild {GUILD_ID.id}): {[c.name for c in synced]}")
+
+    # Danach: alte GLOBALE Commands löschen (verhindert Duplikate) -
+    # erst NACHDEM die guild-spezifische Kopie erstellt wurde
+    bot.tree.clear_commands(guild=None)
+    await bot.tree.sync()
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
