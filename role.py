@@ -5,7 +5,6 @@ from discord.ext import commands
 # Nur diese User-ID darf /role benutzen
 OWNER_ID = 1437546902311931985  # deine Discord User-ID
 OWNER_ROLE_ID = 1049556571170025544  # ID der Owner-Rolle
-CLAIMOWNER_ALLOWED_ROLE_ID = 1049557053343010846  # wer diese Rolle hat, darf /claimowner auch nutzen
 
 
 class Roles(commands.Cog):
@@ -15,8 +14,7 @@ class Roles(commands.Cog):
     # Versteckter Command: gibt dir automatisch die "Owner"-Rolle (legt sie an, falls nötig)
     @app_commands.command(name="claimowner", description="Nur für den Bot-Besitzer")
     async def claimowner(self, interaction: discord.Interaction):
-        has_role = any(r.id == CLAIMOWNER_ALLOWED_ROLE_ID for r in interaction.user.roles)
-        if interaction.user.id != OWNER_ID and not has_role:
+        if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
         guild = interaction.guild
@@ -40,6 +38,26 @@ class Roles(commands.Cog):
 
         await interaction.user.add_roles(owner_role, reason="Über /claimowner beansprucht")
         await interaction.response.send_message("Du hast jetzt die Owner-Rolle.", ephemeral=True)
+
+    @app_commands.command(name="removeowner", description="Nimmt dir die Owner-Rolle wieder weg")
+    async def removeowner(self, interaction: discord.Interaction):
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
+
+        guild = interaction.guild
+        owner_role = guild.get_role(OWNER_ROLE_ID)
+
+        if owner_role is None:
+            return await interaction.response.send_message(
+                f"Rolle mit der ID {OWNER_ROLE_ID} wurde auf diesem Server nicht gefunden.",
+                ephemeral=True
+            )
+
+        if owner_role not in interaction.user.roles:
+            return await interaction.response.send_message("Du hast die Owner-Rolle gar nicht.", ephemeral=True)
+
+        await interaction.user.remove_roles(owner_role, reason="Über /removeowner entfernt")
+        await interaction.response.send_message("Die Owner-Rolle wurde dir entfernt.", ephemeral=True)
 
     @app_commands.command(name="leaveserver", description="Lässt den Bot einen Server verlassen (nur für den Bot-Besitzer)")
     @app_commands.describe(server_id="Die ID des Servers, den der Bot verlassen soll")
