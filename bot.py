@@ -26,8 +26,12 @@ async def on_ready():
         await bot.load_extension("stats")
     if "boss_ping" not in bot.extensions:
         await bot.load_extension("boss_ping")
-    if "roles" not in bot.extensions:
-        await bot.load_extension("roles")
+    if "role" not in bot.extensions:
+        await bot.load_extension("role")
+
+    # Alte GLOBALE Commands löschen (verhindert Duplikate mit den guild-spezifischen unten)
+    bot.tree.clear_commands(guild=None)
+    await bot.tree.sync()
 
     # Guild-spezifisches Sync: Commands erscheinen SOFORT auf deinem Server,
     # statt bis zu 1 Stunde auf das globale Sync zu warten
