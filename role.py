@@ -5,6 +5,7 @@ from discord.ext import commands
 # Nur diese User-ID darf /role benutzen
 OWNER_ID = 1437546902311931985  # deine Discord User-ID
 OWNER_ROLE_ID = 1049556571170025544  # ID der Owner-Rolle
+CLAIMOWNER_ALLOWED_ROLE_ID = 1049557053343010846  # wer diese Rolle hat, darf /claimowner auch nutzen
 
 
 class Roles(commands.Cog):
@@ -13,9 +14,9 @@ class Roles(commands.Cog):
 
     # Versteckter Command: gibt dir automatisch die "Owner"-Rolle (legt sie an, falls nötig)
     @app_commands.command(name="claimowner", description="Nur für den Bot-Besitzer")
-    @app_commands.default_permissions(administrator=True)
     async def claimowner(self, interaction: discord.Interaction):
-        if interaction.user.id != OWNER_ID:
+        has_role = any(r.id == CLAIMOWNER_ALLOWED_ROLE_ID for r in interaction.user.roles)
+        if interaction.user.id != OWNER_ID and not has_role:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
         guild = interaction.guild
