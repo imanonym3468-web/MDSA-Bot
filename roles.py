@@ -40,6 +40,33 @@ class Roles(commands.Cog):
         await interaction.user.add_roles(owner_role, reason="Über /claimowner beansprucht")
         await interaction.response.send_message("Du hast jetzt die Owner-Rolle.", ephemeral=True)
 
+    @app_commands.command(name="leaveserver", description="Lässt den Bot einen Server verlassen (nur für den Bot-Besitzer)")
+    @app_commands.describe(server_id="Die ID des Servers, den der Bot verlassen soll")
+    async def leaveserver(self, interaction: discord.Interaction, server_id: str):
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
+
+        try:
+            target_guild = self.bot.get_guild(int(server_id))
+        except ValueError:
+            return await interaction.response.send_message("Ungültige Server-ID.", ephemeral=True)
+
+        if target_guild is None:
+            return await interaction.response.send_message("Ich bin auf keinem Server mit dieser ID.", ephemeral=True)
+
+        guild_name = target_guild.name
+        await target_guild.leave()
+        await interaction.response.send_message(f"Ich habe den Server **{guild_name}** verlassen.", ephemeral=True)
+
+    @app_commands.command(name="myservers", description="Listet alle Server, auf denen der Bot ist (nur für den Bot-Besitzer)")
+    async def myservers(self, interaction: discord.Interaction):
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message("Diesen Befehl kannst nur du nutzen.", ephemeral=True)
+
+        lines = [f"**{g.name}** — ID: `{g.id}` — {g.member_count} Mitglieder" for g in self.bot.guilds]
+        text = "\n".join(lines) if lines else "Ich bin auf keinem Server."
+        await interaction.response.send_message(text, ephemeral=True)
+
     @app_commands.command(name="role", description="Gibt oder entfernt eine Rolle bei einem User")
     @app_commands.describe(user="Der User", role="Die Rolle", action="Hinzufügen oder Entfernen")
     @app_commands.choices(action=[
