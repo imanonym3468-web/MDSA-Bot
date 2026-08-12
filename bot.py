@@ -25,6 +25,8 @@ async def on_ready():
         await bot.load_extension("lockdown")
     if "dm" not in bot.extensions:
         await bot.load_extension("dm")
+    if "antinuke" not in bot.extensions:
+        await bot.load_extension("antinuke")
     # Erst global syncen (Basis für alle Server, auch neue)
     global_synced = await bot.tree.sync()
     print(f"{len(global_synced)} globale Slash Commands synced: {[c.name for c in global_synced]}")
