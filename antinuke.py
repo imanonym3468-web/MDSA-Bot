@@ -8,7 +8,7 @@ from discord.ext import commands
 
 # ---- Einstellungen ----
 TIME_WINDOW_SECONDS = 60    # Fenster, in dem Löschungen für die Statistik gezählt werden
-LOG_CHANNEL_ID = 0          # <-- Optional: HIER die ID deines Log/Alert-Channels eintragen
+LOG_CHANNEL_ID = 0          # Optional: ID deines zentralen Log-Channels (falls vorhanden)
 
 
 class AntiNuke(commands.Cog):
@@ -19,14 +19,14 @@ class AntiNuke(commands.Cog):
         self._attack_start_time: dict[int, float] = {}
 
     # ==================================================================
-    # SOFORTMASSNAHME: Reagiert auf die Kanal-Löschung
+    # 1. EVENT: REAKTION AUF KANAL-LÖSCHUNG
     # ==================================================================
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         guild = channel.guild
         now = time.time()
 
-        # Startzeitpunkt der Attacke festhalten
+        # Startzeitpunkt des Angriffs protokollieren
         if guild.id not in self._attack_start_time:
             self._attack_start_time[guild.id] = now
 
@@ -35,47 +35,54 @@ class AntiNuke(commands.Cog):
         while deletes and now - deletes[0] > TIME_WINDOW_SECONDS:
             deletes.popleft()
 
-        # Kritischer Pfad: Nur beim allerersten Mal auslösen
+        # Schutz-Kette nur beim ersten erkannten Löschvorgang starten
         if not self._raid_active.get(guild.id, False):
             self._raid_active[guild.id] = True
-            # Geordnete Notfall-Sequenz im Hintergrund starten
             asyncio.create_task(self._execute_defense_sequence(guild, channel))
 
     # ==================================================================
-    # GEORDNETE DEFENSIV-SEQUENZ
+    # 2. SCHUTZ-SEQUENZ (Kick -> Lockdown -> Analyse -> Embed in alle Channels)
     # ==================================================================
     async def _execute_defense_sequence(self, guild: discord.Guild, initial_channel: discord.abc.GuildChannel):
         attack_start = self._attack_start_time.get(guild.id, time.time())
 
         # ------------------------------------------------------------------
-        # 1. BOTS KICKEN (Höchste Priorität)
+        # SCHRITT 1: Bots sofort kicken (Maximale Priorität)
         # ------------------------------------------------------------------
         kicked_bots, failed_bots = await self._kick_all_bots(guild)
 
         # ------------------------------------------------------------------
-        # 2. LOCKDOWN AKTIVIEREN
+        # SCHRITT 2: Lockdown auf allen Text-Kanälen aktivieren
         # ------------------------------------------------------------------
         await self._lock_all_channels(guild)
 
-        # Reaktionszeit berechnen (Zeit vom ersten Löschen bis Ende des Lockdowns)
+        # Reaktionsdauer berechnen
         containment_duration = round(time.time() - attack_start, 2)
 
         # ------------------------------------------------------------------
-        # 3. AUDIT-LOGS ANALYSIEREN & DATEN SAMMELN
+        # SCHRITT 3: Audit-Logs mit Retry-Logik auslesen (Identifikation)
         # ------------------------------------------------------------------
-        culprit = None        # Wer hat den Bot eingeladen / Nuke ausgelöst?
-        executor_bot = None   # Welcher Bot hat die Kanäle gelöscht?
+        culprit = None        # Wer hat die Nuke veranlasst?
+        executor_bot = None   # Welcher Bot/User hat gelöscht?
+
+        # Kurze Kunstpause, damit Discord Zeit hat, das Audit-Log zu schreiben
+        await asyncio.sleep(1.0)
 
         try:
-            async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.channel_delete):
-                if entry.target and entry.target.id == initial_channel.id:
-                    executor_bot = entry.user
-                    culprit = entry.user
+            # Bis zu 3 Versuche mit leichter Verzögerung
+            for _ in range(3):
+                async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.channel_delete):
+                    if entry.target and entry.target.id == initial_channel.id:
+                        executor_bot = entry.user
+                        culprit = entry.user
+                        break
+                if executor_bot:
                     break
+                await asyncio.sleep(0.5)
         except discord.Forbidden:
             pass
 
-        # Falls ein Bot gelöscht hat: Suchen, welcher User diesen Bot hinzugefügt hat
+        # Falls ein Bot gelöscht hat: Ermitteln, wer den Bot auf den Server geholt hat
         if executor_bot and executor_bot.bot:
             try:
                 async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
@@ -85,23 +92,22 @@ class AntiNuke(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        # Täter (sofern identifiziert) automatisch bannen
-        if culprit and culprit != self.bot.user:
+        # Nuke-Auslöser bannen (falls identifiziert und nicht der eigene Bot)
+        if culprit and culprit.id != self.bot.user.id:
             try:
-                await guild.ban(culprit, reason="Anti-Nuke: Auslöser des Angriffs", delete_message_seconds=0)
+                await guild.ban(culprit, reason="Anti-Nuke: Auslöser des Angriffs identifiziert", delete_message_seconds=0)
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
         # ------------------------------------------------------------------
-        # 4. STATUSBERICHT IN JEDEN TEXTKANAL SENDEN
+        # SCHRITT 4: Bericht erstellen und in JEDEN Textkanal senden
         # ------------------------------------------------------------------
         deleted_count = len(self._deletes.get(guild.id, []))
         
-        # Bewertung der Verlustschwere
         if deleted_count <= 2:
-            severity = "🟢 Gering (Frühzeitig abgefangen)"
+            severity = "🟢 Gering (Schnell abgefangen)"
         elif deleted_count <= 5:
-            severity = "🟡 Mittel (Einige Kanäle gelöscht)"
+            severity = "🟡 Mittel (Einige Kanäle verloren)"
         else:
             severity = "🔴 Hoch / Kritisch (Schwerer Schaden)"
 
@@ -110,9 +116,9 @@ class AntiNuke(commands.Cog):
 
         embed = discord.Embed(
             title="🚨 SERVER-LOCKDOWN AKTIVIERT",
-            description="Aufgrund eines erkannten Nuke-Angriffs wurden Sicherheitsmaßnahmen ergriffen.",
+            description="Aufgrund eines erkannten Nuke-Angriffs wurde der Server automatisch gesichert.",
             color=discord.Color.red(),
-            timestamp=datetime.datetime.utcnow()
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
         embed.add_field(
             name="💣 Nuke-Auslöser", 
@@ -120,7 +126,7 @@ class AntiNuke(commands.Cog):
             inline=True
         )
         embed.add_field(
-            name="🤖 Ausführender Bot", 
+            name="🤖 Ausführender Bot/User", 
             value=f"{executor_bot.mention if executor_bot else 'Unbekannt'} (`{executor_bot.id if executor_bot else 'N/A'}`)", 
             inline=True
         )
@@ -130,7 +136,7 @@ class AntiNuke(commands.Cog):
         embed.add_field(name="⏱️ Erkennungs- & Eindämmungszeit", value=f"**{containment_duration} Sekunden**", inline=False)
         embed.add_field(name="👞 Gekickte Bots", value=kicked_list_str, inline=False)
 
-        # Bericht parallel in alle erreichbaren Textkanäle senden
+        # Bericht zeitgleich an alle Kanäle verteilen
         async def send_report(channel: discord.TextChannel):
             try:
                 await channel.send(embed=embed)
@@ -140,7 +146,7 @@ class AntiNuke(commands.Cog):
         await asyncio.gather(*(send_report(ch) for ch in guild.text_channels), return_exceptions=True)
 
     # ==================================================================
-    # Hilfsfunktionen für Kick & Lockdown
+    # HILFSFUNKTIONEN (BOT KICK & CHANNEL LOCK)
     # ==================================================================
     async def _kick_all_bots(self, guild: discord.Guild):
         targets = [m for m in guild.members if m.bot and m.id != self.bot.user.id]
@@ -169,7 +175,6 @@ class AntiNuke(commands.Cog):
                 return_exceptions=True
             )
         else:
-            # Fallback-Lockdown, falls kein externes Lockdown-Cog vorhanden ist
             async def fallback_lock(ch: discord.TextChannel):
                 try:
                     overwrites = ch.overwrites_for(everyone)
@@ -181,13 +186,13 @@ class AntiNuke(commands.Cog):
             await asyncio.gather(*(fallback_lock(ch) for ch in guild.text_channels), return_exceptions=True)
 
     def reset_raid_status(self, guild_id: int):
-        """Von /unlock aufrufen, um den Raid-Status zurückzusetzen."""
+        """Wird aufgerufen, um den Raid-Status manuell zurückzusetzen (z. B. bei /unlock)."""
         self._raid_active[guild_id] = False
         self._deletes[guild_id] = deque()
         self._attack_start_time.pop(guild_id, None)
 
     # ==================================================================
-    # Manueller Trigger: "!nuke" im Chat -> alle fremden Bots BANNEN
+    # MANUELLER TRIGGER: "!nuke" IM CHAT
     # ==================================================================
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -200,7 +205,7 @@ class AntiNuke(commands.Cog):
 
             async def ban_one(member: discord.Member):
                 try:
-                    await guild.ban(member, reason="Anti-Nuke: '!nuke'-Trigger", delete_message_seconds=0)
+                    await guild.ban(member, reason="Anti-Nuke: '!nuke'-Trigger im Chat", delete_message_seconds=0)
                     return member, True
                 except (discord.Forbidden, discord.HTTPException):
                     return member, False
@@ -211,7 +216,7 @@ class AntiNuke(commands.Cog):
 
             log_channel = guild.get_channel(LOG_CHANNEL_ID)
             embed = discord.Embed(
-                title="🚨 '!nuke' erkannt — alle Bots gebannt",
+                title="🚨 '!nuke' erkannt — Alle Bots gebannt",
                 description=(
                     f"Ausgelöst von: {message.author.mention} in {message.channel.mention}\n"
                     f"Gebannt: {len(banned)}/{len(targets)}"
@@ -226,7 +231,7 @@ class AntiNuke(commands.Cog):
                     pass
 
     # ==================================================================
-    # /defense-status
+    # COMMAND: /defense-status
     # ==================================================================
     @app_commands.command(name="defense-status", description="Zeigt, ob der Anti-Nuke-Schutz einsatzbereit ist")
     async def defense_status(self, interaction: discord.Interaction):
