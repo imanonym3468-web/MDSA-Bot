@@ -5,6 +5,7 @@ from discord.ext import commands
 
 LOCKDOWN_MESSAGE = "🔒 **THE SERVER IS CURRENTLY IN A LOCKDOWN, BE PATIENT.**"
 
+
 class Lockdown(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -13,22 +14,18 @@ class Lockdown(commands.Cog):
     async def _lock_channel(self, ch: discord.TextChannel, everyone: discord.Role):
         overwrite = ch.overwrites_for(everyone)
         self._saved_state[ch.id] = (overwrite, ch.name)
-
         overwrite.send_messages = False
         overwrite.create_public_threads = False
         overwrite.create_private_threads = False
         overwrite.add_reactions = False
-
         try:
             await ch.set_permissions(everyone, overwrite=overwrite)
         except discord.HTTPException:
             pass
-
         try:
             await ch.edit(name="lockdown")
         except discord.HTTPException:
             pass
-
         try:
             await ch.send(LOCKDOWN_MESSAGE)
         except discord.HTTPException:
@@ -36,7 +33,6 @@ class Lockdown(commands.Cog):
 
     async def _unlock_channel(self, ch: discord.TextChannel, everyone: discord.Role):
         saved = self._saved_state.pop(ch.id, None)
-
         if saved is not None:
             overwrite, original_name = saved
             try:
@@ -66,13 +62,21 @@ class Lockdown(commands.Cog):
         guild = interaction.guild
         everyone = guild.default_role
         targets = [channel] if channel else guild.text_channels
-
         await interaction.response.defer(ephemeral=True)
 
         await asyncio.gather(*(self._lock_channel(ch, everyone) for ch in targets))
 
+        # Kontaminiert-Rolle nur bei Server-weitem Lockdown vergeben (nicht bei Einzel-Channel)
+        role_note = ""
+        if channel is None:
+            anti_nuke_cog = self.bot.get_cog("AntiNuke")
+            if anti_nuke_cog and hasattr(anti_nuke_cog, "_apply_contaminated_roles"):
+                await anti_nuke_cog._apply_contaminated_roles(guild)
+                role_note = " Alle Member haben die Rolle `Kontaminiert` erhalten."
+
         await interaction.followup.send(
-            f"🔒 Lockdown aktiv für {'`' + channel.name + '`' if channel else 'den gesamten Server'}.",
+            f"🔒 Lockdown aktiv für {'`' + channel.name + '`' if channel else 'den gesamten Server'}."
+            f"{role_note}",
             ephemeral=True
         )
 
@@ -83,15 +87,26 @@ class Lockdown(commands.Cog):
         guild = interaction.guild
         everyone = guild.default_role
         targets = [channel] if channel else guild.text_channels
-
         await interaction.response.defer(ephemeral=True)
 
         await asyncio.gather(*(self._unlock_channel(ch, everyone) for ch in targets))
 
+        # Rollen nur bei Server-weitem Unlock wiederherstellen (nicht bei Einzel-Channel)
+        role_note = ""
+        if channel is None:
+            anti_nuke_cog = self.bot.get_cog("AntiNuke")
+            if anti_nuke_cog and hasattr(anti_nuke_cog, "_restore_roles"):
+                await anti_nuke_cog._restore_roles(guild)
+                if hasattr(anti_nuke_cog, "reset_raid_status"):
+                    anti_nuke_cog.reset_raid_status(guild.id)
+                role_note = " Alle Rollen wurden wiederhergestellt."
+
         await interaction.followup.send(
-            f"🔓 Lockdown aufgehoben für {'`' + channel.name + '`' if channel else 'den gesamten Server'}.",
+            f"🔓 Lockdown aufgehoben für {'`' + channel.name + '`' if channel else 'den gesamten Server'}."
+            f"{role_note}",
             ephemeral=True
         )
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Lockdown(bot))
