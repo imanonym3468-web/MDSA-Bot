@@ -9,6 +9,7 @@ from discord.ext import commands
 # ---- Einstellungen ----
 TIME_WINDOW_SECONDS = 60    # Fenster, in dem Löschungen für die Statistik gezählt werden
 LOG_CHANNEL_ID = 0          # Optional: ID deines zentralen Log-Channels (falls vorhanden)
+CONTAMINATED_ROLE_NAME = "Kontaminiert"
 
 
 class AntiNuke(commands.Cog):
@@ -17,6 +18,8 @@ class AntiNuke(commands.Cog):
         self._deletes: dict[int, deque[float]] = {}
         self._raid_active: dict[int, bool] = {}
         self._attack_start_time: dict[int, float] = {}
+        # Backup der ursprünglichen Rollen pro Member, während des Lockdowns
+        self._role_backup: dict[int, dict[int, list[int]]] = {}
 
     # ==================================================================
     # 1. EVENT: REAKTION AUF KANAL-LÖSCHUNG
@@ -41,7 +44,7 @@ class AntiNuke(commands.Cog):
             asyncio.create_task(self._execute_defense_sequence(guild, channel))
 
     # ==================================================================
-    # 2. SCHUTZ-SEQUENZ (Kick -> Lockdown -> Analyse -> Embed in alle Channels)
+    # 2. SCHUTZ-SEQUENZ (Kick -> Lockdown -> Kontaminiert-Rollen -> Analyse -> Embed in alle Channels)
     # ==================================================================
     async def _execute_defense_sequence(self, guild: discord.Guild, initial_channel: discord.abc.GuildChannel):
         attack_start = self._attack_start_time.get(guild.id, time.time())
@@ -55,6 +58,12 @@ class AntiNuke(commands.Cog):
         # SCHRITT 2: Lockdown auf allen Text-Kanälen aktivieren
         # ------------------------------------------------------------------
         await self._lock_all_channels(guild)
+
+        # ------------------------------------------------------------------
+        # SCHRITT 2b: Allen Membern die "Kontaminiert"-Rolle geben,
+        #             alle anderen Rollen entziehen (mit Backup für /unlock)
+        # ------------------------------------------------------------------
+        await self._apply_contaminated_roles(guild)
 
         # Reaktionsdauer berechnen
         containment_duration = round(time.time() - attack_start, 2)
@@ -103,7 +112,7 @@ class AntiNuke(commands.Cog):
         # SCHRITT 4: Bericht erstellen und in JEDEN Textkanal senden
         # ------------------------------------------------------------------
         deleted_count = len(self._deletes.get(guild.id, []))
-        
+
         if deleted_count <= 2:
             severity = "🟢 Gering (Schnell abgefangen)"
         elif deleted_count <= 5:
@@ -121,13 +130,13 @@ class AntiNuke(commands.Cog):
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
         embed.add_field(
-            name="💣 Nuke-Auslöser", 
-            value=f"{culprit.mention if culprit else 'Unbekannt'} (`{culprit.id if culprit else 'N/A'}`)", 
+            name="💣 Nuke-Auslöser",
+            value=f"{culprit.mention if culprit else 'Unbekannt'} (`{culprit.id if culprit else 'N/A'}`)",
             inline=True
         )
         embed.add_field(
-            name="🤖 Ausführender Bot/User", 
-            value=f"{executor_bot.mention if executor_bot else 'Unbekannt'} (`{executor_bot.id if executor_bot else 'N/A'}`)", 
+            name="🤖 Ausführender Bot/User",
+            value=f"{executor_bot.mention if executor_bot else 'Unbekannt'} (`{executor_bot.id if executor_bot else 'N/A'}`)",
             inline=True
         )
         embed.add_field(name="🕒 Angriffs-Startzeit", value=start_time_formatted, inline=False)
@@ -135,6 +144,7 @@ class AntiNuke(commands.Cog):
         embed.add_field(name="⚠️ Schwere des Verlusts", value=severity, inline=True)
         embed.add_field(name="⏱️ Erkennungs- & Eindämmungszeit", value=f"**{containment_duration} Sekunden**", inline=False)
         embed.add_field(name="👞 Gekickte Bots", value=kicked_list_str, inline=False)
+        embed.add_field(name="☣️ Kontaminiert-Rolle", value="Allen Membern zugewiesen, alte Rollen gesichert", inline=False)
 
         # Bericht zeitgleich an alle Kanäle verteilen
         async def send_report(channel: discord.TextChannel):
@@ -185,11 +195,112 @@ class AntiNuke(commands.Cog):
 
             await asyncio.gather(*(fallback_lock(ch) for ch in guild.text_channels), return_exceptions=True)
 
+    # ==================================================================
+    # HILFSFUNKTIONEN (KONTAMINIERT-ROLLE: VERGABE & WIEDERHERSTELLUNG)
+    # ==================================================================
+    async def _get_or_create_contaminated_role(self, guild: discord.Guild) -> discord.Role:
+        role = discord.utils.get(guild.roles, name=CONTAMINATED_ROLE_NAME)
+        if role is None:
+            role = await guild.create_role(
+                name=CONTAMINATED_ROLE_NAME,
+                color=discord.Color.dark_red(),
+                reason="Lockdown ausgelöst"
+            )
+        return role
+
+    async def _apply_contaminated_roles(self, guild: discord.Guild):
+        """Nimmt allen Membern ihre Rollen weg (mit Backup) und vergibt die Kontaminiert-Rolle."""
+        contaminated_role = await self._get_or_create_contaminated_role(guild)
+        backup: dict[int, list[int]] = {}
+
+        async def process_member(member: discord.Member):
+            if member.bot:
+                return
+
+            roles_to_remove = [r for r in member.roles if r != guild.default_role and r != contaminated_role]
+
+            if roles_to_remove:
+                backup[member.id] = [r.id for r in roles_to_remove]
+                try:
+                    await member.remove_roles(*roles_to_remove, reason="Lockdown: Rollen entzogen")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            if contaminated_role not in member.roles:
+                try:
+                    await member.add_roles(contaminated_role, reason="Lockdown: Kontaminiert vergeben")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+        await asyncio.gather(*(process_member(m) for m in guild.members), return_exceptions=True)
+        self._role_backup[guild.id] = backup
+
+    async def _restore_roles(self, guild: discord.Guild):
+        """Entfernt die Kontaminiert-Rolle und stellt die ursprünglichen Rollen aus dem Backup wieder her."""
+        contaminated_role = discord.utils.get(guild.roles, name=CONTAMINATED_ROLE_NAME)
+        backup = self._role_backup.get(guild.id, {})
+
+        async def process_member(member: discord.Member):
+            if member.bot:
+                return
+
+            if contaminated_role and contaminated_role in member.roles:
+                try:
+                    await member.remove_roles(contaminated_role, reason="Unlock: Kontaminiert entfernt")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            role_ids = backup.get(member.id, [])
+            roles_to_add = [guild.get_role(rid) for rid in role_ids]
+            roles_to_add = [r for r in roles_to_add if r is not None]
+
+            if roles_to_add:
+                try:
+                    await member.add_roles(*roles_to_add, reason="Unlock: Rollen wiederhergestellt")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+        await asyncio.gather(*(process_member(m) for m in guild.members), return_exceptions=True)
+        self._role_backup.pop(guild.id, None)
+
     def reset_raid_status(self, guild_id: int):
         """Wird aufgerufen, um den Raid-Status manuell zurückzusetzen (z. B. bei /unlock)."""
         self._raid_active[guild_id] = False
         self._deletes[guild_id] = deque()
         self._attack_start_time.pop(guild_id, None)
+
+    # ==================================================================
+    # COMMAND: /unlock — Lockdown beenden, Rollen wiederherstellen
+    # ==================================================================
+    @app_commands.command(name="unlock", description="Beendet den Lockdown und stellt alle Rollen wieder her")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def unlock(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        await interaction.response.defer(ephemeral=True)
+
+        await self._restore_roles(guild)
+        self.reset_raid_status(guild.id)
+
+        # Channels wieder freigeben, falls Lockdown-Cog vorhanden
+        lockdown_cog = self.bot.get_cog("Lockdown")
+        everyone = guild.default_role
+        if lockdown_cog and hasattr(lockdown_cog, "_unlock_channel"):
+            await asyncio.gather(
+                *(lockdown_cog._unlock_channel(ch, everyone) for ch in guild.text_channels),
+                return_exceptions=True
+            )
+        else:
+            async def fallback_unlock(ch: discord.TextChannel):
+                try:
+                    overwrites = ch.overwrites_for(everyone)
+                    overwrites.send_messages = None
+                    await ch.set_permissions(everyone, overwrite=overwrites)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            await asyncio.gather(*(fallback_unlock(ch) for ch in guild.text_channels), return_exceptions=True)
+
+        await interaction.followup.send("✅ Lockdown beendet, Rollen wurden wiederhergestellt.", ephemeral=True)
 
     # ==================================================================
     # MANUELLER TRIGGER: "!nuke" IM CHAT
@@ -255,6 +366,9 @@ class AntiNuke(commands.Cog):
 
         checks.append(("Channel-Verwaltung (Lockdown)", bot_member.guild_permissions.manage_channels,
                         "vorhanden" if bot_member.guild_permissions.manage_channels else "fehlt — Lockdown wird fehlschlagen"))
+
+        checks.append(("Rollen-Verwaltung (Kontaminiert)", bot_member.guild_permissions.manage_roles,
+                        "vorhanden" if bot_member.guild_permissions.manage_roles else "fehlt — Kontaminiert-Rolle kann nicht vergeben werden"))
 
         lockdown_cog = self.bot.get_cog("Lockdown")
         checks.append(("Lockdown-Cog geladen", lockdown_cog is not None,
