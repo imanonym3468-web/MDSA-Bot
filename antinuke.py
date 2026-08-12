@@ -6,8 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 # ---- Einstellungen ----
-DELETE_THRESHOLD = 2        # Anzahl gelöschter Channels...
-TIME_WINDOW_SECONDS = 60    # ...innerhalb dieser Zeitspanne löst Lockdown + Ban aus
+TIME_WINDOW_SECONDS = 60    # Fenster, in dem Löschungen für die Statistik gezählt werden
 LOG_CHANNEL_ID = 0          # <-- HIER die ID deines Log/Alert-Channels eintragen
 
 
@@ -17,12 +16,86 @@ class AntiNuke(commands.Cog):
         self._deletes: dict[int, deque[float]] = {}
         self._raid_active: dict[int, bool] = {}
 
-    # ---------- Erkennung: mehrere Channel-Löschungen ----------
+    # ==================================================================
+    # SOFORTMASSNAHME: reagiert auf den ALLERERSTEN gelöschten Channel
+    # ==================================================================
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         guild = channel.guild
         now = time.time()
 
+        deletes = self._deletes.setdefault(guild.id, deque())
+        deletes.append(now)
+        while deletes and now - deletes[0] > TIME_WINDOW_SECONDS:
+            deletes.popleft()
+
+        # Kritischer Pfad: NUR beim ersten Mal auslösen, dann sofort
+        # Kick + Lockdown parallel als Tasks starten — nichts davor abwarten.
+        if not self._raid_active.get(guild.id, False):
+            self._raid_active[guild.id] = True
+            asyncio.create_task(self._kick_all_bots(guild))
+            asyncio.create_task(self._lock_all_channels(guild))
+
+        # Alles Weitere (wer war's, Logging) ist NICHT zeitkritisch und
+        # läuft separat im Hintergrund, blockiert den kritischen Pfad nicht.
+        asyncio.create_task(self._log_incident(guild, channel, len(deletes)))
+
+    # ==================================================================
+    # Kick aller fremden Bots — höchste Priorität, maximal parallel
+    # ==================================================================
+    async def _kick_all_bots(self, guild: discord.Guild):
+        targets = [
+            m for m in guild.members
+            if m.bot and m.id != self.bot.user.id
+        ]
+        if not targets:
+            return
+
+        async def kick_one(member: discord.Member):
+            try:
+                await guild.kick(member, reason="Anti-Nuke: Channel-Löschung erkannt — Sofort-Kick")
+                return member, True
+            except (discord.Forbidden, discord.HTTPException):
+                return member, False
+
+        results = await asyncio.gather(*(kick_one(m) for m in targets))
+        kicked = [m for m, ok in results if ok]
+        failed = [m for m, ok in results if not ok]
+
+        log_channel = guild.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            msg = f"⚡ Sofort-Kick: {len(kicked)}/{len(targets)} fremde Bots entfernt."
+            if failed:
+                msg += f"\n❌ Fehlgeschlagen (Rollen-Hierarchie/Rechte prüfen): {', '.join(str(m) for m in failed)}"
+            try:
+                await log_channel.send(msg)
+            except discord.HTTPException:
+                pass
+
+    # ==================================================================
+    # Server-Lockdown — parallel zum Kick, nicht danach
+    # ==================================================================
+    async def _lock_all_channels(self, guild: discord.Guild):
+        lockdown_cog = self.bot.get_cog("Lockdown")
+        if lockdown_cog is None:
+            log_channel = guild.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                try:
+                    await log_channel.send("⚠️ Lockdown-Cog nicht gefunden — Lockdown übersprungen.")
+                except discord.HTTPException:
+                    pass
+            return
+
+        everyone = guild.default_role
+        await asyncio.gather(
+            *(lockdown_cog._lock_channel(ch, everyone) for ch in guild.text_channels),
+            return_exceptions=True,
+        )
+
+    # ==================================================================
+    # Logging + Verursacher-Identifikation — NICHT zeitkritisch
+    # ==================================================================
+    async def _log_incident(self, guild: discord.Guild, channel: discord.abc.GuildChannel, delete_count: int):
         culprit = None
         try:
             async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.channel_delete):
@@ -32,100 +105,68 @@ class AntiNuke(commands.Cog):
         except discord.Forbidden:
             pass
 
-        deletes = self._deletes.setdefault(guild.id, deque())
-        deletes.append((now, culprit))
-
-        while deletes and now - deletes[0][0] > TIME_WINDOW_SECONDS:
-            deletes.popleft()
-
-        if len(deletes) >= DELETE_THRESHOLD and not self._raid_active.get(guild.id, False):
-            self._raid_active[guild.id] = True
-            latest_culprit = deletes[-1][1]
-            await self._trigger_raid_response(guild, len(deletes), latest_culprit)
-
-    async def _trigger_raid_response(self, guild: discord.Guild, delete_count: int, culprit: discord.abc.User | None):
-        log_channel = guild.get_channel(LOG_CHANNEL_ID)
-
         ban_success = False
-        ban_error = None
         if culprit:
             try:
-                await guild.ban(culprit, reason="Anti-Nuke: Mehrfaches Löschen von Channels erkannt", delete_message_seconds=0)
+                await guild.ban(culprit, reason="Anti-Nuke: Channel-Löschung", delete_message_seconds=0)
                 ban_success = True
-            except discord.Forbidden as e:
-                ban_error = f"Forbidden (Rollen-Hierarchie oder fehlende Berechtigung): {e}"
-            except discord.HTTPException as e:
-                ban_error = f"HTTPException: {e}"
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+        log_channel = guild.get_channel(LOG_CHANNEL_ID)
+        if not log_channel:
+            return
 
         embed = discord.Embed(
-            title="🚨 Raid erkannt — Server gesperrt!",
+            title="🚨 Raid erkannt",
             description=(
-                f"**{delete_count} Channels** wurden innerhalb von {TIME_WINDOW_SECONDS} Sekunden gelöscht.\n"
+                f"**{delete_count} Channels** gelöscht (Fenster: {TIME_WINDOW_SECONDS}s).\n"
                 f"Verursacher: {culprit.mention if culprit else 'unbekannt'} (`{culprit}`)\n"
-                f"Bann: {'✅ erfolgreich' if ban_success else '❌ fehlgeschlagen'}"
-                + (f"\nFehler: `{ban_error}`" if ban_error else "")
+                f"Bann Verursacher: {'✅' if ban_success else '❌'}\n"
+                f"Sofort-Kick aller Bots + Lockdown wurden bereits ausgelöst."
             ),
             color=discord.Color.red()
         )
-        if log_channel:
-            try:
-                await log_channel.send(embed=embed)
-            except discord.HTTPException:
-                pass
-
-        lockdown_cog = self.bot.get_cog("Lockdown")
-        if lockdown_cog is None:
-            if log_channel:
-                await log_channel.send("⚠️ Lockdown-Cog nicht gefunden — automatischer Lockdown fehlgeschlagen.")
-            return
-
-        everyone = guild.default_role
-        targets = guild.text_channels
-        await asyncio.gather(*(lockdown_cog._lock_channel(ch, everyone) for ch in targets))
-
-        if log_channel:
-            await log_channel.send("🔒 Server automatisch gesperrt. Nutze `/unlock`, sobald alles geklärt ist.")
+        try:
+            await log_channel.send(embed=embed)
+        except discord.HTTPException:
+            pass
 
     def reset_raid_status(self, guild_id: int):
-        """Wird z.B. von /unlock aufgerufen, um den Raid-Status zurückzusetzen."""
+        """Von /unlock aufrufen, um den Raid-Status zurückzusetzen."""
         self._raid_active[guild_id] = False
         self._deletes[guild_id] = deque()
 
-    # ---------- Erkennung: "!nuke" im Chat -> alle fremden Bots bannen ----------
+    # ==================================================================
+    # Manueller Trigger: "!nuke" im Chat -> alle fremden Bots BANNEN
+    # ==================================================================
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author == self.bot.user:
-            return
-        if message.guild is None:
+        if message.author == self.bot.user or message.guild is None:
             return
 
         if message.content.strip().lower() == "!nuke":
             guild = message.guild
-            log_channel = guild.get_channel(LOG_CHANNEL_ID)
+            targets = [m for m in guild.members if m.bot and m.id != self.bot.user.id]
 
-            bots_to_ban = [
-                member for member in guild.members
-                if member.bot and member.id != self.bot.user.id
-            ]
-
-            banned = []
-            failed = []
-            for bot_member in bots_to_ban:
+            async def ban_one(member: discord.Member):
                 try:
-                    await guild.ban(bot_member, reason="Anti-Nuke: '!nuke'-Trigger erkannt", delete_message_seconds=0)
-                    banned.append(bot_member)
-                except discord.Forbidden:
-                    failed.append(bot_member)
-                except discord.HTTPException:
-                    failed.append(bot_member)
+                    await guild.ban(member, reason="Anti-Nuke: '!nuke'-Trigger", delete_message_seconds=0)
+                    return member, True
+                except (discord.Forbidden, discord.HTTPException):
+                    return member, False
 
+            results = await asyncio.gather(*(ban_one(m) for m in targets))
+            banned = [m for m, ok in results if ok]
+            failed = [m for m, ok in results if not ok]
+
+            log_channel = guild.get_channel(LOG_CHANNEL_ID)
             embed = discord.Embed(
                 title="🚨 '!nuke' erkannt — alle Bots gebannt",
                 description=(
-                    f"Ausgelöst von: {message.author.mention} (`{message.author}`) in {message.channel.mention}\n"
-                    f"Gebannt: {len(banned)}\n"
-                    f"Fehlgeschlagen: {len(failed)}"
-                    + (f"\n⚠️ Konnte nicht gebannt werden: {', '.join(str(b) for b in failed)}" if failed else "")
+                    f"Ausgelöst von: {message.author.mention} in {message.channel.mention}\n"
+                    f"Gebannt: {len(banned)}/{len(targets)}"
+                    + (f"\n❌ Fehlgeschlagen: {', '.join(str(m) for m in failed)}" if failed else "")
                 ),
                 color=discord.Color.red()
             )
@@ -135,7 +176,9 @@ class AntiNuke(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-    # ---------- Status-Check ----------
+    # ==================================================================
+    # /defense-status
+    # ==================================================================
     @app_commands.command(name="defense-status", description="Zeigt, ob der Anti-Nuke-Schutz einsatzbereit ist")
     async def defense_status(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -144,47 +187,29 @@ class AntiNuke(commands.Cog):
         checks: list[tuple[str, bool, str]] = []
 
         log_channel = guild.get_channel(LOG_CHANNEL_ID)
-        checks.append((
-            "Log-Channel konfiguriert",
-            log_channel is not None,
-            f"#{log_channel.name}" if log_channel else "LOG_CHANNEL_ID nicht gesetzt oder ungültig"
-        ))
+        checks.append(("Log-Channel konfiguriert", log_channel is not None,
+                        f"#{log_channel.name}" if log_channel else "LOG_CHANNEL_ID nicht gesetzt"))
 
-        can_view_audit = bot_member.guild_permissions.view_audit_log
-        checks.append((
-            "Audit-Log-Zugriff",
-            can_view_audit,
-            "vorhanden" if can_view_audit else "fehlt — Bot kann Verursacher nicht identifizieren"
-        ))
+        checks.append(("Kick-Berechtigung", bot_member.guild_permissions.kick_members,
+                        "vorhanden" if bot_member.guild_permissions.kick_members else "fehlt — Sofort-Kick wird fehlschlagen"))
 
-        can_ban = bot_member.guild_permissions.ban_members
-        checks.append((
-            "Bann-Berechtigung",
-            can_ban,
-            "vorhanden" if can_ban else "fehlt — Bot kann niemanden bannen"
-        ))
+        checks.append(("Bann-Berechtigung", bot_member.guild_permissions.ban_members,
+                        "vorhanden" if bot_member.guild_permissions.ban_members else "fehlt — Bann des Verursachers wird fehlschlagen"))
 
-        can_manage_channels = bot_member.guild_permissions.manage_channels
-        checks.append((
-            "Channel-Verwaltung (für Lockdown)",
-            can_manage_channels,
-            "vorhanden" if can_manage_channels else "fehlt — automatischer Lockdown wird fehlschlagen"
-        ))
+        checks.append(("Audit-Log-Zugriff", bot_member.guild_permissions.view_audit_log,
+                        "vorhanden" if bot_member.guild_permissions.view_audit_log else "fehlt — Verursacher kann nicht identifiziert werden"))
+
+        checks.append(("Channel-Verwaltung (Lockdown)", bot_member.guild_permissions.manage_channels,
+                        "vorhanden" if bot_member.guild_permissions.manage_channels else "fehlt — Lockdown wird fehlschlagen"))
 
         lockdown_cog = self.bot.get_cog("Lockdown")
-        checks.append((
-            "Lockdown-Cog geladen",
-            lockdown_cog is not None,
-            "geladen" if lockdown_cog else "nicht geladen — auf 'lockdown' Extension prüfen"
-        ))
+        checks.append(("Lockdown-Cog geladen", lockdown_cog is not None,
+                        "geladen" if lockdown_cog else "nicht geladen"))
 
         high_role = bot_member.top_role.position >= (len(guild.roles) - 3)
-        checks.append((
-            "Bot-Rolle hoch genug",
-            high_role,
-            f"Position {bot_member.top_role.position}/{len(guild.roles) - 1}"
-            + ("" if high_role else " — evtl. zu niedrig, Bann könnte bei hochrangigen Accounts scheitern")
-        ))
+        checks.append(("Bot-Rolle hoch genug", high_role,
+                        f"Position {bot_member.top_role.position}/{len(guild.roles) - 1}"
+                        + ("" if high_role else " — evtl. zu niedrig")))
 
         all_ready = all(ok for _, ok, _ in checks)
         raid_status = self._raid_active.get(guild.id, False)
@@ -194,17 +219,13 @@ class AntiNuke(commands.Cog):
             description=f"**Gesamtstatus: {'✅ Einsatzbereit' if all_ready else '⚠️ Nicht vollständig einsatzbereit'}**",
             color=discord.Color.green() if all_ready else discord.Color.orange()
         )
-
         for name, ok, detail in checks:
-            emoji = "✅" if ok else "❌"
-            embed.add_field(name=f"{emoji} {name}", value=detail, inline=False)
-
+            embed.add_field(name=f"{'✅' if ok else '❌'} {name}", value=detail, inline=False)
         embed.add_field(
             name="🚦 Aktueller Raid-Status",
-            value="🔴 AKTIV (Lockdown ausgelöst)" if raid_status else "🟢 Normal",
+            value="🔴 AKTIV" if raid_status else "🟢 Normal",
             inline=False
         )
-        embed.set_footer(text=f"Schwelle: {DELETE_THRESHOLD} gelöschte Channels in {TIME_WINDOW_SECONDS}s")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
