@@ -8,8 +8,56 @@ LOCKDOWN_MESSAGE = "🔒 **THE SERVER IS CURRENTLY IN A LOCKDOWN, BE PATIENT.**"
 class Lockdown(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # speichert pro Channel: (ursprüngliche Permission-Overwrite, ursprünglicher Name)
         self._saved_state: dict[int, tuple[discord.PermissionOverwrite, str]] = {}
+
+    async def _lock_channel(self, ch: discord.TextChannel, everyone: discord.Role):
+        overwrite = ch.overwrites_for(everyone)
+        self._saved_state[ch.id] = (overwrite, ch.name)
+
+        overwrite.send_messages = False
+        overwrite.create_public_threads = False
+        overwrite.create_private_threads = False
+        overwrite.add_reactions = False
+
+        try:
+            await ch.set_permissions(everyone, overwrite=overwrite)
+        except discord.HTTPException:
+            pass
+
+        try:
+            await ch.edit(name="lockdown")
+        except discord.HTTPException:
+            pass
+
+        try:
+            await ch.send(LOCKDOWN_MESSAGE)
+        except discord.HTTPException:
+            pass
+
+    async def _unlock_channel(self, ch: discord.TextChannel, everyone: discord.Role):
+        saved = self._saved_state.pop(ch.id, None)
+
+        if saved is not None:
+            overwrite, original_name = saved
+            try:
+                await ch.set_permissions(everyone, overwrite=overwrite)
+            except discord.HTTPException:
+                pass
+            try:
+                if ch.name != original_name:
+                    await ch.edit(name=original_name)
+            except discord.HTTPException:
+                pass
+        else:
+            overwrite = ch.overwrites_for(everyone)
+            overwrite.send_messages = None
+            overwrite.create_public_threads = None
+            overwrite.create_private_threads = None
+            overwrite.add_reactions = None
+            try:
+                await ch.set_permissions(everyone, overwrite=overwrite)
+            except discord.HTTPException:
+                pass
 
     @app_commands.command(name="lockdown", description="Sperrt den Server oder einen Channel")
     @app_commands.describe(channel="Optional: nur diesen Channel sperren (Standard: ganzer Server)")
@@ -21,30 +69,7 @@ class Lockdown(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        for ch in targets:
-            overwrite = ch.overwrites_for(everyone)
-            self._saved_state[ch.id] = (overwrite, ch.name)  # Original sichern (Rechte + Name)
-
-            # @everyone das Schreiben (und Reagieren/Threads erstellen) verbieten
-            overwrite.send_messages = False
-            overwrite.create_public_threads = False
-            overwrite.create_private_threads = False
-            overwrite.add_reactions = False
-            await ch.set_permissions(everyone, overwrite=overwrite)
-            # Hinweis: Mitglieder mit "Administrator"-Berechtigung umgehen Channel-Overwrites
-            # automatisch und können trotz der Sperre weiterhin schreiben.
-
-            try:
-                await ch.edit(name="lockdown")
-            except discord.HTTPException:
-                pass
-
-            try:
-                await ch.send(LOCKDOWN_MESSAGE)
-            except discord.HTTPException:
-                pass
-
-            await asyncio.sleep(1)  # schont das Rate-Limit bei vielen Channels
+        await asyncio.gather(*(self._lock_channel(ch, everyone) for ch in targets))
 
         await interaction.followup.send(
             f"🔒 Lockdown aktiv für {'`' + channel.name + '`' if channel else 'den gesamten Server'}.",
@@ -61,26 +86,7 @@ class Lockdown(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        for ch in targets:
-            saved = self._saved_state.pop(ch.id, None)
-
-            if saved is not None:
-                overwrite, original_name = saved
-                await ch.set_permissions(everyone, overwrite=overwrite)
-                try:
-                    if ch.name != original_name:
-                        await ch.edit(name=original_name)
-                except discord.HTTPException:
-                    pass
-            else:
-                overwrite = ch.overwrites_for(everyone)
-                overwrite.send_messages = None
-                overwrite.create_public_threads = None
-                overwrite.create_private_threads = None
-                overwrite.add_reactions = None
-                await ch.set_permissions(everyone, overwrite=overwrite)
-
-            await asyncio.sleep(1)
+        await asyncio.gather(*(self._unlock_channel(ch, everyone) for ch in targets))
 
         await interaction.followup.send(
             f"🔓 Lockdown aufgehoben für {'`' + channel.name + '`' if channel else 'den gesamten Server'}.",
