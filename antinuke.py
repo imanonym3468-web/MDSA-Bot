@@ -270,39 +270,6 @@ class AntiNuke(commands.Cog):
         self._attack_start_time.pop(guild_id, None)
 
     # ==================================================================
-    # COMMAND: /unlock — Lockdown beenden, Rollen wiederherstellen
-    # ==================================================================
-    @app_commands.command(name="unlock", description="Beendet den Lockdown und stellt alle Rollen wieder her")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def unlock(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        await interaction.response.defer(ephemeral=True)
-
-        await self._restore_roles(guild)
-        self.reset_raid_status(guild.id)
-
-        # Channels wieder freigeben, falls Lockdown-Cog vorhanden
-        lockdown_cog = self.bot.get_cog("Lockdown")
-        everyone = guild.default_role
-        if lockdown_cog and hasattr(lockdown_cog, "_unlock_channel"):
-            await asyncio.gather(
-                *(lockdown_cog._unlock_channel(ch, everyone) for ch in guild.text_channels),
-                return_exceptions=True
-            )
-        else:
-            async def fallback_unlock(ch: discord.TextChannel):
-                try:
-                    overwrites = ch.overwrites_for(everyone)
-                    overwrites.send_messages = None
-                    await ch.set_permissions(everyone, overwrite=overwrites)
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
-
-            await asyncio.gather(*(fallback_unlock(ch) for ch in guild.text_channels), return_exceptions=True)
-
-        await interaction.followup.send("✅ Lockdown beendet, Rollen wurden wiederhergestellt.", ephemeral=True)
-
-    # ==================================================================
     # MANUELLER TRIGGER: "!nuke" IM CHAT
     # ==================================================================
     @commands.Cog.listener()
