@@ -20,6 +20,10 @@ class AntiNuke(commands.Cog):
         self._attack_start_time: dict[int, float] = {}
         # Backup der ursprünglichen Rollen pro Member, während des Lockdowns
         self._role_backup: dict[int, dict[int, list[int]]] = {}
+        # Ob die automatische Erkennung pro Guild aktiv ist (Standard: an)
+        self._detection_enabled: dict[int, bool] = {}
+        # Laufende Verteidigungssequenzen, um sie per /antinuke stop abbrechen zu können
+        self._active_tasks: dict[int, asyncio.Task] = {}
 
     # ==================================================================
     # 1. EVENT: REAKTION AUF KANAL-LÖSCHUNG
@@ -27,6 +31,10 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         guild = channel.guild
+
+        if not self._detection_enabled.get(guild.id, True):
+            return
+
         now = time.time()
 
         # Startzeitpunkt des Angriffs protokollieren
@@ -41,7 +49,9 @@ class AntiNuke(commands.Cog):
         # Schutz-Kette nur beim ersten erkannten Löschvorgang starten
         if not self._raid_active.get(guild.id, False):
             self._raid_active[guild.id] = True
-            asyncio.create_task(self._execute_defense_sequence(guild, channel))
+            task = asyncio.create_task(self._execute_defense_sequence(guild, channel))
+            self._active_tasks[guild.id] = task
+            task.add_done_callback(lambda t, gid=guild.id: self._active_tasks.pop(gid, None))
 
     # ==================================================================
     # 2. SCHUTZ-SEQUENZ (Kick -> Lockdown -> Kontaminiert-Rollen -> Analyse -> Embed in alle Channels)
@@ -309,6 +319,41 @@ class AntiNuke(commands.Cog):
                     pass
 
     # ==================================================================
+    # COMMAND-GRUPPE: /antinuke on|off|stop
+    # ==================================================================
+    antinuke_group = app_commands.Group(name="antinuke", description="Steuert die automatische Anti-Nuke-Erkennung")
+
+    @antinuke_group.command(name="on", description="Aktiviert die automatische Anti-Nuke-Erkennung")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def antinuke_on(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        self._detection_enabled[guild.id] = True
+        await interaction.response.send_message("🟢 Automatische Anti-Nuke-Erkennung ist jetzt **aktiv**.", ephemeral=True)
+
+    @antinuke_group.command(name="off", description="Deaktiviert die automatische Anti-Nuke-Erkennung")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def antinuke_off(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        self._detection_enabled[guild.id] = False
+        await interaction.response.send_message("🔴 Automatische Anti-Nuke-Erkennung ist jetzt **deaktiviert**. Neue Channel-Löschungen lösen keine Reaktion mehr aus.", ephemeral=True)
+
+    @antinuke_group.command(name="stop", description="Bricht eine gerade laufende Anti-Nuke-Reaktion sofort ab")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def antinuke_stop(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        task = self._active_tasks.get(guild.id)
+
+        if task is None or task.done():
+            self._raid_active[guild.id] = False
+            await interaction.response.send_message("ℹ️ Es läuft aktuell keine Anti-Nuke-Reaktion, die gestoppt werden könnte.", ephemeral=True)
+            return
+
+        task.cancel()
+        self.reset_raid_status(guild.id)
+        self._active_tasks.pop(guild.id, None)
+        await interaction.response.send_message("🛑 Laufende Anti-Nuke-Reaktion wurde abgebrochen. Lockdown/Rollen bleiben in dem Zustand, in dem sie gerade waren — ggf. `/unlock` nutzen.", ephemeral=True)
+
+    # ==================================================================
     # COMMAND: /defense-status
     # ==================================================================
     @app_commands.command(name="defense-status", description="Zeigt, ob der Anti-Nuke-Schutz einsatzbereit ist")
@@ -359,6 +404,12 @@ class AntiNuke(commands.Cog):
         embed.add_field(
             name="🚦 Aktueller Raid-Status",
             value="🔴 AKTIV" if raid_status else "🟢 Normal",
+            inline=False
+        )
+        detection_on = self._detection_enabled.get(guild.id, True)
+        embed.add_field(
+            name="🔎 Automatische Erkennung",
+            value="🟢 Aktiviert" if detection_on else "🔴 Deaktiviert (`/antinuke off`)",
             inline=False
         )
 
